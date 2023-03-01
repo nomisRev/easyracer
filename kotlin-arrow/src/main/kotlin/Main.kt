@@ -1,6 +1,7 @@
 import arrow.core.Either
 import arrow.core.merge
 import arrow.fx.coroutines.ResourceScope
+import arrow.fx.coroutines.closeable
 import arrow.fx.coroutines.parMap
 import arrow.fx.coroutines.raceN
 import arrow.fx.coroutines.resourceScope
@@ -17,18 +18,14 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.time.delay
 import java.time.Duration
 import java.time.Instant
+import kotlin.reflect.KSuspendFunction1
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 suspend fun <A> ignoreException(block: suspend () -> A): A =
   Either.catch { block() }.mapLeft { awaitCancellation() }.merge()
-
-suspend fun ResourceScope.client(): HttpClient =
-  install({
-    HttpClient {
-      install(HttpTimeout)
-    }
-  }) { client, _ -> client.close() }
 
 // Note: Intentionally, only url handling code is shared across scenarios
 suspend fun HttpClient.scenario1(url: (Int) -> String): String =
@@ -68,10 +65,9 @@ suspend fun HttpClient.scenario3(url: (Int) -> String): String = coroutineScope 
   done
 }
 
-
 suspend fun HttpClient.scenario4(url: (Int) -> String): String =
   raceN({
-    ignoreException { withTimeout(1.seconds) { get(url(4)) } }
+    withTimeoutOrNull(1.seconds) { get(url(4)) } ?: awaitCancellation()
   }, {
     get(url(4))
   }).merge().bodyAsText()
@@ -159,11 +155,16 @@ fun HttpClient.scenarios() = listOf(
   ::scenario8,
   ::scenario9
 )
-//val scenarios = listOf(::scenario8)
 
-suspend fun results(url: (Int) -> String) = resourceScope {
-  client().scenarios().parMap { it(url) }
-}
+suspend fun results(url: (Int) -> String) =
+  resourceScope {
+    val client = closeable {
+      HttpClient {
+        install(HttpTimeout)
+      }
+    }
+    client.scenarios().parMap { it(url) }
+  }
 
 suspend fun main() {
   fun url(scenario: Int) = "http://localhost:8080/$scenario"
